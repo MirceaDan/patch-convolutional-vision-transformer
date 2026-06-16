@@ -1,0 +1,8 @@
+############################################
+PatchCvT trianing prerequisits
+1) install Anaconda prompt: https://www.anaconda.com/download
+2) open Anaconda prompt
+3) create conda work environemnt (default base): conda env creat PatchCvT
+4) run: conda activate PatchCvT (if it hasn't already been activated)
+5) run: pip install python3-opencv torch jupyter
+6) install Visual Studio Code: https://code.visualstudio.com/download

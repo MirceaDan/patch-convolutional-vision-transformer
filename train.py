@@ -7,15 +7,28 @@ import numpy as np
 from pathlib import Path
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 import torchvision.transforms as T
+from torchvision.models import (
+    resnet18,
+    ResNet18_Weights
+)
 
 from PIL import Image
 
 ################################################################################
 # CONFIG
 ################################################################################
+# --- CONFIG ---
+#dataset structure:
+#dataset/
+#    train/
+#    test/
+#memorybank/
+
 ROI_SIZE = 224
 
 VALID_EXTENSIONS = [
@@ -24,6 +37,14 @@ VALID_EXTENSIONS = [
     ".png",
     ".bmp"
 ]
+
+MEMORY_DATASET = "memorybank"
+TRAIN_DATASET = "database/train"
+TEST_DATASET = "database/test"
+EPOCHS = 10
+BATCH_SIZE = 1
+LR = 1e-4
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ################################################################################
 # IMAGE HELPERS
@@ -330,19 +351,6 @@ def build_patchcvt_dataloader(
 #Semantic Gate
 #↓
 #Preservation Head
-
-################################################################################
-# IMPORTS
-################################################################################
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-from torchvision.models import (
-    resnet18,
-    ResNet18_Weights
-)
-
 ################################################################################
 # FROZEN RESNET18 BACKBONE
 ################################################################################
@@ -371,7 +379,6 @@ class FrozenResNet18(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         return x
-
 
 ################################################################################
 # MEMORY BANK
@@ -481,7 +488,6 @@ class MemoryRetrieval(nn.Module):
         )
         return q_tilde
 
-
 ################################################################################
 # TOKEN CONSTRUCTION
 ################################################################################
@@ -521,7 +527,6 @@ class SemanticTokenBuilder(nn.Module):
             dim=-1
         )
         return z, r, a
-
 
 ################################################################################
 # TRANSFORMER ENCODER
@@ -595,7 +600,6 @@ class RobustnessHead(nn.Module):
     ):
         return self.net(z)
 
-
 ################################################################################
 # PRESERVATION HEAD
 ################################################################################
@@ -625,7 +629,6 @@ class PreservationHead(nn.Module):
         return self.net(
             embedding
         )
-
 
 ################################################################################
 # PATCHCVT
@@ -1172,58 +1175,12 @@ def train_patchcvt(
 # MAIN
 ################################################################################
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--memory_dataset",
-        type=str,
-        required=True
-    )
-    parser.add_argument(
-        "--train_dataset",
-        type=str,
-        required=True
-    )
-
-    parser.add_argument(
-        "--test_dataset",
-        type=str,
-        required=True
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=50
-    )
-
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=16
-    )
-
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-4
-    )
-
-    args = parser.parse_args()
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    print()
-    print("Device:", device)
     model = train_patchcvt(
-        train_dir=args.train_dataset,
-        test_dir=args.test_dataset,
-        memory_dir=args.memory_dataset,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        device=device
+        train_dir=TRAIN_DATASET,
+        test_dir=TEST_DATASET,
+        memory_dir=MEMORY_DATASET,
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LR,
+        device=DEVICE
     )
