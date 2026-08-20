@@ -43,6 +43,10 @@ SOURCE_ROOT = Path(
 #         images/
 #         labels/
 #
+#     val/
+#         images/
+#         labels/
+#
 #     test/
 #         images/
 #         labels/
@@ -67,11 +71,12 @@ TARGET_CLASS_ID = 0
 
 
 # ------------------------------------------------------------
-# TRAIN / TEST SPLIT
+# DATASET SPLIT
 # ------------------------------------------------------------
 
-TRAIN_RATIO = 0.80
+TRAIN_RATIO = 0.70
 TEST_RATIO = 0.20
+VAL_RATIO = 0.10
 
 RANDOM_SEED = 42
 
@@ -108,7 +113,11 @@ def find_images(images_root: Path):
     )
 
 
-def get_label_path(image_path: Path, images_root: Path, labels_root: Path):
+def get_label_path(
+    image_path: Path,
+    images_root: Path,
+    labels_root: Path,
+):
     """
     Map:
 
@@ -148,9 +157,15 @@ def read_vertical_panel_annotations(label_path: Path):
     if not label_path.exists():
         return vertical_panel_annotations
 
-    with label_path.open("r", encoding="utf-8") as f:
+    with label_path.open(
+        "r",
+        encoding="utf-8",
+    ) as f:
 
-        for line_number, line in enumerate(f, start=1):
+        for line_number, line in enumerate(
+            f,
+            start=1,
+        ):
 
             line = line.strip()
 
@@ -170,6 +185,7 @@ def read_vertical_panel_annotations(label_path: Path):
                 continue
 
             try:
+
                 class_id = int(parts[0])
 
             except ValueError:
@@ -226,7 +242,10 @@ def copy_dataset_item(
         / relative_path.with_suffix(".txt")
     )
 
-    # Create parent directories.
+    # --------------------------------------------------------
+    # Create parent directories
+    # --------------------------------------------------------
+
     destination_image.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -237,20 +256,29 @@ def copy_dataset_item(
         exist_ok=True,
     )
 
-    # Copy original image without modification.
+    # --------------------------------------------------------
+    # Copy image
+    # --------------------------------------------------------
+
     shutil.copy2(
         image_path,
         destination_image,
     )
 
-    # Write ONLY Vertical Panel annotations.
+    # --------------------------------------------------------
+    # Write ONLY Vertical Panel annotations
+    # --------------------------------------------------------
+
     with destination_label.open(
         "w",
         encoding="utf-8",
     ) as f:
 
         for annotation in annotations:
-            f.write(annotation + "\n")
+
+            f.write(
+                annotation + "\n"
+            )
 
 
 def write_data_yaml():
@@ -266,6 +294,7 @@ def write_data_yaml():
     yaml_content = f"""path: {root_path}
 
 train: train/images
+val: val/images
 test: test/images
 
 names:
@@ -291,6 +320,29 @@ def main():
     print("=" * 70)
     print("Vertical Panel Dataset Builder")
     print("=" * 70)
+
+    # --------------------------------------------------------
+    # Validate split configuration
+    # --------------------------------------------------------
+
+    split_sum = (
+        TRAIN_RATIO
+        + TEST_RATIO
+        + VAL_RATIO
+    )
+
+    if abs(split_sum - 1.0) > 1e-6:
+
+        print(
+            "\nERROR: TRAIN_RATIO + TEST_RATIO + VAL_RATIO "
+            "must equal 1.0"
+        )
+
+        print(
+            f"Current sum: {split_sum}"
+        )
+
+        sys.exit(1)
 
     # --------------------------------------------------------
     # Validate source directories
@@ -376,6 +428,7 @@ def main():
         if not label_path.exists():
 
             missing_labels += 1
+
             continue
 
         annotations = read_vertical_panel_annotations(
@@ -385,6 +438,7 @@ def main():
         if not annotations:
 
             malformed_or_empty += 1
+
             continue
 
         # Store both image path and filtered annotations.
@@ -460,10 +514,25 @@ def main():
         total_samples * TRAIN_RATIO
     )
 
-    test_count = (
+    test_count = int(
+        total_samples * TEST_RATIO
+    )
+
+    # Whatever remains goes to validation.
+    #
+    # This guarantees:
+    #
+    # train + test + val == total
+    #
+    val_count = (
         total_samples
         - train_count
+        - test_count
     )
+
+    # --------------------------------------------------------
+    # Create split lists
+    # --------------------------------------------------------
 
     train_samples = valid_samples[
         :train_count
@@ -471,6 +540,11 @@ def main():
 
     test_samples = valid_samples[
         train_count:
+        train_count + test_count
+    ]
+
+    val_samples = valid_samples[
+        train_count + test_count:
     ]
 
     # --------------------------------------------------------
@@ -496,6 +570,12 @@ def main():
         f"Test:                        "
         f"{len(test_samples):,} "
         f"({len(test_samples) / total_samples * 100:.1f}%)"
+    )
+
+    print(
+        f"Validation:                  "
+        f"{len(val_samples):,} "
+        f"({len(val_samples) / total_samples * 100:.1f}%)"
     )
 
     # --------------------------------------------------------
@@ -553,7 +633,10 @@ def main():
             images_root=images_root,
         )
 
-        if index % 100 == 0 or index == len(train_samples):
+        if (
+            index % 100 == 0
+            or index == len(train_samples)
+        ):
 
             print(
                 f"[TRAIN] "
@@ -585,11 +668,49 @@ def main():
             images_root=images_root,
         )
 
-        if index % 100 == 0 or index == len(test_samples):
+        if (
+            index % 100 == 0
+            or index == len(test_samples)
+        ):
 
             print(
                 f"[TEST]  "
                 f"{index:,}/{len(test_samples):,}",
+                flush=True,
+            )
+
+    # --------------------------------------------------------
+    # Copy VALIDATION
+    # --------------------------------------------------------
+
+    print("\n")
+    print("=" * 70)
+    print("BUILDING VALIDATION SET")
+    print("=" * 70)
+
+    for index, (
+        image_path,
+        annotations,
+    ) in enumerate(
+        val_samples,
+        start=1,
+    ):
+
+        copy_dataset_item(
+            image_path=image_path,
+            annotations=annotations,
+            split_name="val",
+            images_root=images_root,
+        )
+
+        if (
+            index % 100 == 0
+            or index == len(val_samples)
+        ):
+
+            print(
+                f"[VAL]    "
+                f"{index:,}/{len(val_samples):,}",
                 flush=True,
             )
 
@@ -629,6 +750,14 @@ def main():
     )
 
     print(
+        "  val/images/"
+    )
+
+    print(
+        "  val/labels/"
+    )
+
+    print(
         "  test/images/"
     )
 
@@ -657,6 +786,22 @@ def main():
     print(
         "\nAll non-Vertical-Panel annotations "
         "were discarded."
+    )
+
+    print(
+        "\nSplit:"
+    )
+
+    print(
+        f"  Train: {TRAIN_RATIO * 100:.0f}%"
+    )
+
+    print(
+        f"  Test:  {TEST_RATIO * 100:.0f}%"
+    )
+
+    print(
+        f"  Val:   {VAL_RATIO * 100:.0f}%"
     )
 
 
