@@ -84,7 +84,7 @@ cp -r libtorch /home/mircea/Desktop/IntruderNet/intrudernet_inference/thirdparty
 
 ############################################
 LabelImg setup:
-conda create -n labelimg_clean python=3.10 -y && conda activate labelimg_clean && python -m pip install labelImg==1.8.6 PyQt5==5.15.6 lxmlconda create -n labelimg_clean python=3.10 -y && conda activate labelimg_clean && python -m pip install labelImg==1.8.6 PyQt5==5.15.6 lxml
+conda create -n labelimg_clean python=3.7.6 -y && conda activate labelimg_clean && python -m pip install labelImg==1.8.6 PyQt5==5.15.10 lxmlconda create -n labelimg_clean python=3.7.6 -y && conda activate labelimg_clean && python -m pip install labelImg==1.8.6 PyQt5==5.15.10 lxml
 
 python -c "p=r'%CONDA_PREFIX%\Lib\site-packages\libs\canvas.py'; s=open(p,encoding='utf-8').read(); s=s.replace('p.drawLine(self.prev_point.x(), 0, self.prev_point.x(), self.pixmap.height())','p.drawLine(int(self.prev_point.x()), 0, int(self.prev_point.x()), int(self.pixmap.height()))'); s=s.replace('p.drawLine(0, self.prev_point.y(), self.pixmap.width(), self.prev_point.y())','p.drawLine(0, int(self.prev_point.y()), int(self.pixmap.width()), int(self.prev_point.y()))'); open(p,'w',encoding='utf-8').write(s)"
 
