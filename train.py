@@ -307,7 +307,7 @@ class PatchCvTDataset(BaseROIDataset):
 def build_memory_dataloader(
     dataset_dir,
     batch_size=32,
-    num_workers=4
+    num_workers=0
 ):
     ds = MemoryBankDataset(
         dataset_dir
@@ -323,7 +323,7 @@ def build_patchcvt_dataloader(
     dataset_dir,
     batch_size=16,
     shuffle=True,
-    num_workers=4
+    num_workers=0
 ):
     ds = PatchCvTDataset(
         dataset_dir
