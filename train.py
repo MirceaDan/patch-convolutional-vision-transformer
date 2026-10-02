@@ -1146,7 +1146,7 @@ def train_patchcvt(
         # save last
         ####################################################################
         save_checkpoint(
-            "last.pt",
+            "model/last.pt",
             model,
             optimizer,
             epoch,
@@ -1161,7 +1161,7 @@ def train_patchcvt(
                 val_metrics["total"]
             )
             save_checkpoint(
-                "best.pt",
+                "model/best.pt",
                 model,
                 optimizer,
                 epoch,
