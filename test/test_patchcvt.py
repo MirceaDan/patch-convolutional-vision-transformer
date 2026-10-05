@@ -44,7 +44,7 @@ def _resnet18_no_download(*args, **kwargs):
 tv_models.resnet18 = _resnet18_no_download
 
 try:
-    from train import PatchCvT, VALID_EXTENSIONS, yolo_to_xyxy  # noqa: E402
+    from patchCvT_AlternativeEmbodiment.train import PatchCvT, VALID_EXTENSIONS, yolo_to_xyxy  # noqa: E402
 finally:
     tv_models.resnet18 = _original_resnet18
 
