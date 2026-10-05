@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 import torch
+import torchvision.models as tv_models
 import torchvision.transforms as T
 from PIL import Image
 
@@ -19,22 +20,48 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from train import PatchCvT, VALID_EXTENSIONS, yolo_to_xyxy  # noqa: E402
+
+################################################################################
+# PATCHCVT IMPORT WITHOUT BACKBONE WEIGHT DOWNLOAD
+################################################################################
+# PatchCvT uses ResNet18 as its CNN backbone.  The checkpoint already contains
+# the trained/frozen backbone parameters, so there is no reason for the test
+# script to download ImageNet weights just to construct the model before
+# immediately overwriting them with checkpoint parameters.
+#
+# We temporarily replace torchvision.models.resnet18 during the import of
+# train.py.  This affects ONLY model construction; model.load_state_dict()
+# below still loads the exact checkpoint weights.
+_original_resnet18 = tv_models.resnet18
+
+
+def _resnet18_no_download(*args, **kwargs):
+    kwargs.pop("weights", None)
+    kwargs.pop("pretrained", None)
+    return _original_resnet18(*args, weights=None, **kwargs)
+
+
+tv_models.resnet18 = _resnet18_no_download
+
+try:
+    from train import PatchCvT, VALID_EXTENSIONS, yolo_to_xyxy  # noqa: E402
+finally:
+    tv_models.resnet18 = _original_resnet18
 
 
 ################################################################################
 # CONFIGURATION
 ################################################################################
 TEST_DATA_DIR = PROJECT_ROOT / "test" / "test_data"
-MODEL_PATH: Optional[Path] = None  # Example: PROJECT_ROOT / "model" / "best.pt"
+MODEL_PATH: Optional[Path] = PROJECT_ROOT / "model" / "best.pt"
 MEMORY_BANK_PATH: Optional[Path] = None  # Optional external memory tensor path
-THRESHOLD = 0.5
+GATE_THRESHOLD = 0.5
 IMAGE_SIZE = 224
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OUTPUT_CSV = PROJECT_ROOT / "test" / "results.csv"
 OUTPUT_VIS_DIR = PROJECT_ROOT / "test" / "results"
 SAVE_VISUALIZATIONS = True
-PRESERVATION_AGGREGATION = "mean"  # one of: mean, min, p10
+AGGREGATION = "mean"  # one of: mean, min, p10
 
 
 ################################################################################
@@ -230,14 +257,11 @@ def print_model_api_discovery(model: torch.nn.Module, device: torch.device) -> N
 
     print("Score interpretation check:")
     print("  - train.py applies Sigmoid in RobustnessHead and PreservationHead")
-    print("  - preservation output is already in [0,1] (do not apply sigmoid twice)")
+    print("  - gate is computed in forward() with torch.sigmoid(...) and is already in [0,1]")
 
-    pres = out.get("preservation")
     rob = out.get("robustness")
     gate = out.get("gate")
 
-    if isinstance(pres, torch.Tensor):
-        print(f"  - preservation appears ROI-level with shape {tuple(pres.shape)}")
     if isinstance(rob, torch.Tensor):
         print(f"  - robustness appears patch-level with shape {tuple(rob.shape)}")
     if isinstance(gate, torch.Tensor):
@@ -283,7 +307,7 @@ def compute_binary_metrics(gt: np.ndarray, pred: np.ndarray) -> Dict[str, float]
     }
 
 
-def compute_auc_scores(gt: np.ndarray, preservation_score: np.ndarray) -> Dict[str, Optional[float]]:
+def compute_auc_scores(gt: np.ndarray, gate_score: np.ndarray) -> Dict[str, Optional[float]]:
     try:
         from sklearn.metrics import average_precision_score, roc_auc_score
     except Exception:
@@ -295,12 +319,12 @@ def compute_auc_scores(gt: np.ndarray, preservation_score: np.ndarray) -> Dict[s
         return {"roc_auc": None, "pr_auc": None}
 
     try:
-        roc_auc = float(roc_auc_score(gt, preservation_score))
+        roc_auc = float(roc_auc_score(gt, gate_score))
     except Exception:
         roc_auc = None
 
     try:
-        pr_auc = float(average_precision_score(gt, preservation_score))
+        pr_auc = float(average_precision_score(gt, gate_score))
     except Exception:
         pr_auc = None
 
@@ -322,7 +346,7 @@ def draw_visualizations(
 
         gt = int(row["gt_anomaly"])
         pred = int(row["predicted_pass"])
-        pres = float(row["preservation_score"])
+        gate_score = float(row["gate_score"])
 
         gt_pass = int(gt == 0)
         correct = gt_pass == pred
@@ -337,7 +361,7 @@ def draw_visualizations(
         lines = [
             f"TCD #{obj_idx}",
             f"GT: {gt_txt}",
-            f"PatchCvT preservation: {pres:.3f}",
+            f"PatchCvT gate: {gate_score:.3f}",
             f"Prediction: {pred_txt}",
         ]
 
@@ -382,7 +406,18 @@ def main() -> None:
         )
 
     model = PatchCvT(memory_bank=memory_bank_cpu)
-    model.load_state_dict(model_state, strict=True)
+
+    # The architecture above is instantiated without downloading any
+    # pretrained backbone weights.  The checkpoint must contain the complete
+    # PatchCvT state, including the frozen ResNet18 backbone parameters.
+    incompatible = model.load_state_dict(model_state, strict=True)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "Checkpoint/model state mismatch: "
+            f"missing={incompatible.missing_keys}, "
+            f"unexpected={incompatible.unexpected_keys}"
+        )
+
     model = model.to(DEVICE)
     model.eval()
 
@@ -393,8 +428,8 @@ def main() -> None:
 
     print_model_api_discovery(model, DEVICE)
 
-    print("Prediction convention: pass if preservation_score >= THRESHOLD")
-    print(f"Preservation threshold: {THRESHOLD:.4f}")
+    print("Prediction convention: pass if gate_score >= GATE_THRESHOLD")
+    print(f"Gate threshold: {GATE_THRESHOLD:.1f} (experimental KPI only)")
 
     preprocess = build_preprocess()
     image_paths = collect_images(TEST_DATA_DIR)
@@ -477,17 +512,16 @@ def main() -> None:
                 if not isinstance(out, dict):
                     raise TypeError(f"Model output must be dict, got {type(out)}")
 
-                preservation_tensor = out.get("preservation")
                 robustness_tensor = out.get("robustness")
                 residual_tensor = out.get("residual")
                 gate_tensor = out.get("gate")
 
-                if not isinstance(preservation_tensor, torch.Tensor):
-                    raise KeyError("Model output missing tensor key: 'preservation'")
+                if not isinstance(gate_tensor, torch.Tensor):
+                    raise KeyError("Model output missing tensor key: 'gate'")
 
-                preservation_score = aggregate_patch_scores(
-                    preservation_tensor,
-                    PRESERVATION_AGGREGATION,
+                gate_score = aggregate_patch_scores(
+                    gate_tensor,
+                    AGGREGATION,
                 )
 
                 # Robustness/gate/residual are patch-level in current train.py
@@ -501,13 +535,7 @@ def main() -> None:
                     if isinstance(residual_tensor, torch.Tensor)
                     else float("nan")
                 )
-                gate_score = (
-                    aggregate_patch_scores(gate_tensor, "mean")
-                    if isinstance(gate_tensor, torch.Tensor)
-                    else float("nan")
-                )
-
-                predicted_pass = int(preservation_score >= THRESHOLD)
+                predicted_pass = int(gate_score >= GATE_THRESHOLD)
 
                 row = {
                     "image": image_path.name,
@@ -518,12 +546,11 @@ def main() -> None:
                     "x2": x2,
                     "y2": y2,
                     "gt_anomaly": ann["gt_anomaly"],
+                    "gate_score": gate_score,
                     "robustness_score": robustness_score,
-                    "preservation_score": preservation_score,
                     "predicted_pass": predicted_pass,
                     "residual_score": residual_score,
-                    "gate_score": gate_score,
-                    "preservation_aggregation": PRESERVATION_AGGREGATION,
+                    "aggregation": AGGREGATION,
                 }
 
                 rows.append(row)
@@ -555,12 +582,11 @@ def main() -> None:
         "x2",
         "y2",
         "gt_anomaly",
+        "gate_score",
         "robustness_score",
-        "preservation_score",
         "predicted_pass",
         "residual_score",
-        "gate_score",
-        "preservation_aggregation",
+        "aggregation",
     ]
 
     with OUTPUT_CSV.open("w", newline="", encoding="utf-8") as f:
@@ -570,7 +596,7 @@ def main() -> None:
 
     if len(rows) == 0:
         print("=" * 60)
-        print("PatchCvT BENCHMARK")
+        print("PatchCvT semantic preservation gate benchmark")
         print("=" * 60)
         print("No valid ROI predictions were produced.")
         print(f"Images scanned: {stats['images_total']}")
@@ -584,22 +610,22 @@ def main() -> None:
     gt_anomaly = np.array([int(r["gt_anomaly"]) for r in rows], dtype=np.int64)
     gt = (gt_anomaly == 0).astype(np.int64)
     pred = np.array([int(r["predicted_pass"]) for r in rows], dtype=np.int64)
-    preservation_score = np.array([float(r["preservation_score"]) for r in rows], dtype=np.float64)
+    gate_score = np.array([float(r["gate_score"]) for r in rows], dtype=np.float64)
 
     binary = compute_binary_metrics(gt, pred)
-    auc = compute_auc_scores(gt, preservation_score)
+    auc = compute_auc_scores(gt, gate_score)
 
     normal_mask = gt_anomaly == 0
     anomaly_mask = gt_anomaly == 1
 
-    mean_pres_normal = float(np.mean([rows[i]["preservation_score"] for i in np.where(normal_mask)[0]])) if np.any(normal_mask) else float("nan")
-    mean_pres_anom = float(np.mean([rows[i]["preservation_score"] for i in np.where(anomaly_mask)[0]])) if np.any(anomaly_mask) else float("nan")
+    mean_gate_normal = float(np.mean([rows[i]["gate_score"] for i in np.where(normal_mask)[0]])) if np.any(normal_mask) else float("nan")
+    mean_gate_anom = float(np.mean([rows[i]["gate_score"] for i in np.where(anomaly_mask)[0]])) if np.any(anomaly_mask) else float("nan")
 
     mean_rob_normal = float(np.mean([rows[i]["robustness_score"] for i in np.where(normal_mask)[0]])) if np.any(normal_mask) else float("nan")
     mean_rob_anom = float(np.mean([rows[i]["robustness_score"] for i in np.where(anomaly_mask)[0]])) if np.any(anomaly_mask) else float("nan")
 
     print("=" * 60)
-    print("PatchCvT BENCHMARK")
+    print("PatchCvT semantic preservation gate benchmark")
     print("=" * 60)
     print(f"Images evaluated:       {stats['images_total'] - stats['images_skipped']}")
     print(f"ROIs evaluated:         {len(rows)}")
@@ -607,7 +633,7 @@ def main() -> None:
     print(f"Anomalous ROIs:         {int(np.sum(gt_anomaly == 1))}")
     print()
 
-    print(f"Preservation threshold: {THRESHOLD:.2f}")
+    print(f"Gate threshold: {GATE_THRESHOLD:.1f} (experimental KPI only)")
 
     print()
     print(f"Accuracy:               {binary['accuracy']:.6f}")
@@ -621,9 +647,9 @@ def main() -> None:
     print(f"PR-AUC:                 {pr_txt}")
     print()
 
-    print("Mean preservation:")
-    print(f"    normal:             {mean_pres_normal:.6f}")
-    print(f"    anomalous:          {mean_pres_anom:.6f}")
+    print("Mean gate score:")
+    print(f"    normal:             {mean_gate_normal:.6f}")
+    print(f"    anomalous:          {mean_gate_anom:.6f}")
     print()
 
     print("Mean robustness:")

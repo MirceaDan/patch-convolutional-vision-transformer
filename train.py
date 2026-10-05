@@ -45,6 +45,7 @@ EPOCHS = 10
 BATCH_SIZE = 1
 LR = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PATCHCVT_DEBUG_SHAPES = True
 
 ################################################################################
 # IMAGE HELPERS
@@ -441,10 +442,7 @@ class MemoryBankBuilder:
                 len(all_features)
             )[:self.memory_size]
             all_features = all_features[idx]
-        memory_bank = F.normalize(
-            all_features,
-            dim=1
-        )
+        memory_bank = all_features
         print(
             "Memory bank:",
             memory_bank.shape
@@ -486,7 +484,7 @@ class MemoryRetrieval(nn.Module):
             weights,
             memory_bank
         )
-        return q_tilde
+        return q_tilde, distances
 
 ################################################################################
 # TOKEN CONSTRUCTION
@@ -669,6 +667,8 @@ class PatchCvT(nn.Module):
         self.preservation_head = (
             PreservationHead()
         )
+        for p in self.preservation_head.parameters():
+            p.requires_grad = False
 
         ####################################################################
         # Eq.16
@@ -679,6 +679,8 @@ class PatchCvT(nn.Module):
         self.We = nn.Parameter(
             torch.tensor(1.0)
         )
+        self.debug_shapes = PATCHCVT_DEBUG_SHAPES
+        self._debug_shapes_printed = False
 
     def extract_patches(
         self,
@@ -691,7 +693,33 @@ class PatchCvT(nn.Module):
             .permute(0,2,3,1)
             .reshape(B,H*W,C)
         )
-        return patches
+        return fmap, patches
+
+    def _debug_forward_shapes(
+        self,
+        x,
+        fmap,
+        q,
+        distances,
+        z_prime,
+        robustness,
+        gate,
+        score
+    ):
+        if not self.debug_shapes or self._debug_shapes_printed:
+            return
+
+        print("[PatchCvT debug] input ROI shape:", tuple(x.shape))
+        print("[PatchCvT debug] feature-map shape:", tuple(fmap.shape))
+        print("[PatchCvT debug] patch tensor shape:", tuple(q.shape))
+        print("[PatchCvT debug] memory-bank shape:", tuple(self.memory_bank.shape))
+        print("[PatchCvT debug] nearest-neighbour distance shape:", tuple(distances.shape))
+        print("[PatchCvT debug] transformer output shape:", tuple(z_prime.shape))
+        print("[PatchCvT debug] robustness shape:", tuple(robustness.shape))
+        print("[PatchCvT debug] gate shape:", tuple(gate.shape))
+        print("[PatchCvT debug] preservation/semantic score shape:", tuple(score.shape))
+        print("[PatchCvT debug] final scalar score shape:", tuple(score.shape))
+        self._debug_shapes_printed = True
 
     def forward(
         self,
@@ -700,12 +728,12 @@ class PatchCvT(nn.Module):
         ####################################################################
         # patch embeddings
         ####################################################################
-        q = self.extract_patches(x)
+        fmap, q = self.extract_patches(x)
 
         ####################################################################
         # memory retrieval
         ####################################################################
-        q_tilde = self.retrieval(
+        q_tilde, distances = self.retrieval(
             q,
             self.memory_bank
         )
@@ -768,12 +796,21 @@ class PatchCvT(nn.Module):
         )
 
         ####################################################################
-        # preservation score
+        # ROI semantic preservation score
         ####################################################################
-        preservation = (
-            self.preservation_head(
-                embedding
-            )
+        preservation = gate.mean(
+            dim=1
+        )
+
+        self._debug_forward_shapes(
+            x,
+            fmap,
+            q,
+            distances,
+            z_prime,
+            robustness,
+            gate,
+            preservation
         )
 
         return {
@@ -782,6 +819,8 @@ class PatchCvT(nn.Module):
             "robustness": robustness,
             "gate": gate,
             "residual": residual_mag,
+            "distances": distances,
+            "z_hat": z_hat,
             "q": q,
             "q_tilde": q_tilde
         }
@@ -793,11 +832,13 @@ class PatchCvTLoss(nn.Module):
     def __init__(
         self,
         lambda_semantic=1.0,
+        lambda_memory=0.5,
         lambda_robust=0.25,
         lambda_gate=0.25
     ):
         super().__init__()
         self.lambda_semantic = lambda_semantic
+        self.lambda_memory = lambda_memory
         self.lambda_robust = lambda_robust
         self.lambda_gate = lambda_gate
 
@@ -826,6 +867,12 @@ class PatchCvTLoss(nn.Module):
             target
         )
 
+    def memory_loss(
+        self,
+        residual
+    ):
+        return residual.mean()
+
     def gate_loss(
         self,
         gate,
@@ -848,18 +895,39 @@ class PatchCvTLoss(nn.Module):
             clean_out["embedding"],
             degraded_out["embedding"]
         )
-        robust = self.robustness_loss(
-            degraded_out["robustness"],
-            degraded_out["residual"]
+        memory = 0.5 * (
+            self.memory_loss(clean_out["residual"])
+            +
+            self.memory_loss(degraded_out["residual"])
+        )
+        robust = 0.5 * (
+            self.robustness_loss(
+                clean_out["robustness"],
+                clean_out["residual"]
+            )
+            +
+            self.robustness_loss(
+                degraded_out["robustness"],
+                degraded_out["residual"]
+            )
         )
 
-        gate = self.gate_loss(
-            degraded_out["gate"],
-            degraded_out["residual"]
+        gate = 0.5 * (
+            self.gate_loss(
+                clean_out["gate"],
+                clean_out["residual"]
+            )
+            +
+            self.gate_loss(
+                degraded_out["gate"],
+                degraded_out["residual"]
+            )
         )
 
         total = (
             self.lambda_semantic * semantic
+            +
+            self.lambda_memory * memory
             +
             self.lambda_robust * robust
             +
@@ -869,6 +937,7 @@ class PatchCvTLoss(nn.Module):
         return {
             "total": total,
             "semantic": semantic,
+            "memory": memory,
             "robust": robust,
             "gate": gate
         }
@@ -887,6 +956,7 @@ def train_one_epoch(
     running = {
         "total":0,
         "semantic":0,
+        "memory":0,
         "robust":0,
         "gate":0
     }
@@ -929,6 +999,7 @@ def validate(
     running = {
         "total":0,
         "semantic":0,
+        "memory":0,
         "robust":0,
         "gate":0
     }
@@ -1034,6 +1105,56 @@ def predict_roi(
         "residual":
             residual
     }
+
+def run_patchcvt_sanity_check(
+    model,
+    loader,
+    device
+):
+    print("Running PatchCvT sanity check...")
+    model.eval()
+
+    batch = next(iter(loader))
+    clean = batch["clean"].to(device)
+
+    with torch.no_grad():
+        out = model(clean)
+
+    score = out["preservation"]
+    if score.ndim != 2 or score.shape[-1] != 1:
+        raise RuntimeError(
+            f"Expected ROI scalar shape [B,1], got {tuple(score.shape)}"
+        )
+
+    if not torch.isfinite(score).all():
+        raise RuntimeError("Non-finite ROI scalar detected in sanity check")
+
+    if score.min().item() < 0.0 or score.max().item() > 1.0:
+        raise RuntimeError("ROI scalar is outside expected [0,1] range")
+
+    if out["distances"].shape[:2] != out["gate"].shape[:2]:
+        raise RuntimeError("Memory retrieval distances are inconsistent with patch layout")
+
+    if any(p.requires_grad for p in model.backbone.parameters()):
+        raise RuntimeError("Backbone parameters must remain frozen")
+
+    if model.memory_bank.requires_grad:
+        raise RuntimeError("Memory bank must remain gradient-free")
+
+    trainable = [
+        name
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+    print("PatchCvT sanity trainable parameters:")
+    for name in trainable:
+        print("  -", name)
+
+    print("PatchCvT sanity check passed.")
+    print("  input shape:", tuple(clean.shape))
+    print("  scalar shape:", tuple(score.shape))
+    print("  scalar range:", (score.min().item(), score.max().item()))
+    print("  memory bank used:", tuple(model.memory_bank.shape))
     
 ################################################################################
 # TRAIN
@@ -1118,6 +1239,12 @@ def train_patchcvt(
     # loss
     ########################################################################
     criterion = PatchCvTLoss()
+
+    run_patchcvt_sanity_check(
+        model,
+        train_loader,
+        device
+    )
 
     ########################################################################
     # training
