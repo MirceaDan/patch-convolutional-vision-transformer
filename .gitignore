@@ -28,7 +28,7 @@ var/
 *.egg
 
 # PyTorch / model checkpoints
-*.pt
+#*.pt
 #*.pth
 *.ckpt
 *.weights
