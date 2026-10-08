@@ -3,9 +3,9 @@ from __future__ import annotations
 import copy
 import csv
 import math
+import os
 import random
 import time
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
@@ -23,15 +23,15 @@ from torchvision.models import ResNet18_Weights, resnet18
 # CONFIGURATION / CONSTANTS
 ################################################################################
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-TRAIN_DATASET = PROJECT_ROOT / "database" / "train"
-TEST_DATASET = PROJECT_ROOT / "database" / "test"
-MEMORY_BANK_DATASET = PROJECT_ROOT / "memorybank"
-CHECKPOINT_DIR = PROJECT_ROOT / "model"
-BEST_CHECKPOINT_PATH = CHECKPOINT_DIR / "best.pt"
-LAST_CHECKPOINT_PATH = CHECKPOINT_DIR / "last.pt"
-MEMORY_BANK_PATH = CHECKPOINT_DIR / "memory_bank.pt"
-EVALUATION_CSV_PATH = CHECKPOINT_DIR / "test_scores.csv"
+PROJECT_ROOT = r"E:\Projects\patch-convolutional-vision-transformer"
+TRAIN_DATASET = os.path.join(PROJECT_ROOT, "database", "train")
+TEST_DATASET = os.path.join(PROJECT_ROOT, "database", "test")
+MEMORY_BANK_DATASET = os.path.join(PROJECT_ROOT, "memorybank")
+CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "model")
+BEST_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "best.pt")
+LAST_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "last.pt")
+MEMORY_BANK_PATH = os.path.join(CHECKPOINT_DIR, "memory_bank.pt")
+EVALUATION_CSV_PATH = os.path.join(CHECKPOINT_DIR, "test_scores.csv")
 
 IMAGE_SIZE = 224
 INPUT_CHANNELS = 3
@@ -101,12 +101,14 @@ def seed_worker(worker_id: int) -> None:
 # DATASET / YOLO ROI LOADING
 ################################################################################
 
-def parse_yolo_annotation(label_path: Path) -> List[Dict[str, float]]:
+def parse_yolo_annotation(label_path: str) -> List[Dict[str, float]]:
 	annotations: List[Dict[str, float]] = []
-	if not label_path.exists():
+	if not os.path.exists(label_path):
 		return annotations
 
-	for line_number, line in enumerate(label_path.read_text(encoding="utf-8").splitlines(), 1):
+	with open(label_path, "r", encoding="utf-8") as label_file:
+		lines = label_file.read().splitlines()
+	for line_number, line in enumerate(lines, 1):
 		values = line.strip().split()
 		if not values:
 			continue
@@ -133,19 +135,22 @@ def parse_yolo_annotation(label_path: Path) -> List[Dict[str, float]]:
 	return annotations
 
 
-def collect_roi_samples(dataset_path: Path) -> List[Dict[str, Any]]:
-	if not dataset_path.is_dir():
+def collect_roi_samples(dataset_path: str) -> List[Dict[str, Any]]:
+	if not os.path.isdir(dataset_path):
 		raise FileNotFoundError(f"Dataset directory does not exist: {dataset_path}")
 
 	image_paths = sorted(
-		path for path in dataset_path.rglob("*")
-		if path.is_file() and path.suffix.lower() in VALID_IMAGE_EXTENSIONS
+		os.path.join(directory, filename)
+		for directory, _, filenames in os.walk(dataset_path)
+		for filename in filenames
+		if os.path.isfile(os.path.join(directory, filename))
+		and os.path.splitext(filename)[1].lower() in VALID_IMAGE_EXTENSIONS
 	)
 	samples: List[Dict[str, Any]] = []
 	missing_annotations = 0
 	for image_path in image_paths:
-		label_path = image_path.with_suffix(".txt")
-		if not label_path.is_file():
+		label_path = os.path.splitext(image_path)[0] + ".txt"
+		if not os.path.isfile(label_path):
 			missing_annotations += 1
 			continue
 		for object_index, annotation in enumerate(parse_yolo_annotation(label_path)):
@@ -542,13 +547,13 @@ def build_contextual_memory_bank(
 	return reservoir
 
 
-def save_memory_bank(path: Path, memory_bank: torch.Tensor, config: Dict[str, Any]) -> None:
+def save_memory_bank(path: str, memory_bank: torch.Tensor, config: Dict[str, Any]) -> None:
 	if memory_bank.ndim != 2 or memory_bank.shape[1] != TRANSFORMER_DIM:
 		raise ValueError(f"Memory bank must have shape [K,{TRANSFORMER_DIM}]")
 	torch.save({"memory_bank": memory_bank.cpu(), "config": config}, path)
 
 
-def load_memory_bank(path: Path, map_location: Any = "cpu") -> torch.Tensor:
+def load_memory_bank(path: str, map_location: Any = "cpu") -> torch.Tensor:
 	payload = torch.load(path, map_location=map_location, weights_only=False)
 	memory_bank = payload["memory_bank"]
 	if not isinstance(memory_bank, torch.Tensor) or memory_bank.ndim != 2:
@@ -647,7 +652,7 @@ def configuration_dict() -> Dict[str, Any]:
 
 
 def save_checkpoint(
-	path: Path,
+	path: str,
 	model: PatchCvT,
 	optimizer: torch.optim.Optimizer,
 	epoch: int,
@@ -666,7 +671,7 @@ def save_checkpoint(
 	torch.save(checkpoint, path)
 
 
-def load_model_from_checkpoint(path: Path) -> Tuple[PatchCvT, Dict[str, Any]]:
+def load_model_from_checkpoint(path: str) -> Tuple[PatchCvT, Dict[str, Any]]:
 	checkpoint = torch.load(path, map_location=DEVICE, weights_only=False)
 	checkpoint_config = checkpoint["config"]
 	if checkpoint_config["transformer_dim"] != TRANSFORMER_DIM:
@@ -682,7 +687,7 @@ def load_model_from_checkpoint(path: Path) -> Tuple[PatchCvT, Dict[str, Any]]:
 
 def train_model() -> Tuple[PatchCvT, torch.Tensor]:
 	set_random_seed(RANDOM_SEED)
-	CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+	os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 	train_samples = collect_roi_samples(TRAIN_DATASET)
 	memory_samples = collect_roi_samples(MEMORY_BANK_DATASET)
@@ -849,7 +854,7 @@ def evaluate_test_set(model: PatchCvT, memory_bank: torch.Tensor) -> List[Dict[s
 
 	if not results:
 		raise RuntimeError("No test ROIs were evaluated")
-	with EVALUATION_CSV_PATH.open("w", newline="", encoding="utf-8") as output_file:
+	with open(EVALUATION_CSV_PATH, "w", newline="", encoding="utf-8") as output_file:
 		writer = csv.DictWriter(output_file, fieldnames=list(results[0].keys()))
 		writer.writeheader()
 		writer.writerows(results)
